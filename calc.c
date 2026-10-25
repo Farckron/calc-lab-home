@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -15,10 +16,18 @@
 
 enum { NUM, PLUS, MINUS, STAR, SLASH, POW, LPAREN, RPAREN, END, BAD };
 
+// A number from the file or a result. Integers and floats are kept apart
+// because int / int must truncate (7 / 2 is 3) while 7 / 2.0 is 3.5.
+typedef struct {
+    int is_float;   // 1: the value is in f, 0: the value is in i
+    long long i;
+    double f;
+} Value;
+
 typedef struct {
     int type;
     size_t start;   // index of the first character of the token in the file
-    long long val;
+    Value val;      // only used when type is NUM
 } Token;
 
 // The whole file is in memory, so a position is just an index into it.
@@ -33,6 +42,8 @@ static void fail(size_t index) {
     if (!err) err = index + 1;
 }
 
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
+
 // Reads the next token into tok. A line ends at '\n' or at the end of the
 // file, and both become END, so "missing operand at end of line" naturally
 // points at the '\n' (or at file length + 1 when there is no final '\n').
@@ -42,10 +53,23 @@ static void next(void) {
     if (pos >= len || src[pos] == '\n') { tok.type = END; return; }
 
     char c = src[pos];
-    if (c >= '0' && c <= '9') {
+    if (is_digit(c)) {
+        // A number is digits, optionally followed by '.' and more digits.
+        // If no digit follows the '.', the number stops before it and the
+        // '.' becomes a BAD token, so "5." and ".5" fail at the '.', and
+        // "1.5e3" fails at the 'e', exactly where the task wants it.
         tok.type = NUM;
-        tok.val = strtoll(src + pos, NULL, 10);
-        while (pos < len && src[pos] >= '0' && src[pos] <= '9') pos++;
+        while (pos < len && is_digit(src[pos])) pos++;
+        int is_float = pos + 1 < len && src[pos] == '.' && is_digit(src[pos + 1]);
+        if (is_float) {
+            pos++;
+            while (pos < len && is_digit(src[pos])) pos++;
+        }
+        // strtoll/strtod stop at the first character that is not part of
+        // a number, and the buffer ends with '\0', so they cannot run past it.
+        tok.val.is_float = is_float;
+        if (is_float) tok.val.f = strtod(src + tok.start, NULL);
+        else tok.val.i = strtoll(src + tok.start, NULL, 10);
         return;
     }
     pos++;
@@ -61,29 +85,6 @@ static void next(void) {
     else tok.type = BAD;
 }
 
-static long long expr(void);
-
-// primary := NUMBER | '(' expr ')'
-// There are no unary operators, so a number or '(' must come here. Anything
-// else (an operator, ')', a bad character, the end of the line) is reported
-// at the start of that token, because that is where the parser got stuck.
-// A missing ')' is found the same way: after the inner expr the parser
-// expects ')', sees END instead, and reports the '\n' position.
-static long long primary(void) {
-    if (tok.type == NUM) {
-        long long v = tok.val;
-        next();
-        return v;
-    }
-    if (tok.type != LPAREN) { fail(tok.start); return 0; }
-    next();
-    long long v = expr();
-    if (err) return 0;
-    if (tok.type != RPAREN) { fail(tok.start); return 0; }
-    next();
-    return v;
-}
-
 // Integer power by repeated squaring, so even 1 ** 1000000000 takes about
 // 30 steps. b is squared only while bits of e are left, so it never grows
 // past the final result (the tests promise that result fits).
@@ -97,19 +98,77 @@ static long long ipow(long long b, long long e) {
     return r;
 }
 
+// Applies one operator to a and b. If both are integers the math stays in
+// long long. If at least one is a float, both are turned into double first.
+// op_at is where the operator starts, rhs_at where the right operand starts:
+// dividing by zero and a negative integer exponent are the right operand's
+// fault, but an infinite or NaN result only exists because of the operator.
+static Value apply(int op, Value a, Value b, size_t op_at, size_t rhs_at) {
+    Value r = {0, 0, 0};
+    if (!a.is_float && !b.is_float) {
+        if (op == PLUS) r.i = a.i + b.i;
+        else if (op == MINUS) r.i = a.i - b.i;
+        else if (op == STAR) r.i = a.i * b.i;
+        else if (op == SLASH) {
+            if (b.i == 0) fail(rhs_at);
+            else r.i = a.i / b.i;   // C already truncates toward zero
+        } else {
+            if (b.i < 0) fail(rhs_at);
+            else r.i = ipow(a.i, b.i);
+        }
+        return r;
+    }
+    double x = a.is_float ? a.f : (double)a.i;
+    double y = b.is_float ? b.f : (double)b.i;
+    r.is_float = 1;
+    if (op == PLUS) r.f = x + y;
+    else if (op == MINUS) r.f = x - y;
+    else if (op == STAR) r.f = x * y;
+    else if (op == SLASH) {
+        if (y == 0) { fail(rhs_at); return r; }
+        r.f = x / y;
+    } else r.f = pow(x, y);
+    // For example 10.0 ** 400 is inf and (0 - 8) ** 0.5 is NaN.
+    if (!isfinite(r.f)) fail(op_at);
+    return r;
+}
+
+static Value expr(void);
+
+// primary := NUMBER | '(' expr ')'
+// There are no unary operators, so a number or '(' must come here. Anything
+// else (an operator, ')', a bad character, the end of the line) is reported
+// at the start of that token, because that is where the parser got stuck.
+// A missing ')' is found the same way: after the inner expr the parser
+// expects ')', sees END instead, and reports the '\n' position.
+static Value primary(void) {
+    Value v = tok.val;
+    if (tok.type == NUM) {
+        next();
+        return v;
+    }
+    if (tok.type != LPAREN) { fail(tok.start); return v; }
+    next();
+    v = expr();
+    if (err) return v;
+    if (tok.type != RPAREN) { fail(tok.start); return v; }
+    next();
+    return v;
+}
+
 // power := primary [ '**' power ]
 // The exponent is parsed by calling power() again, not with a loop like the
 // other levels. That recursion finishes the right side first, so
 // 2 ** 3 ** 2 groups as 2 ** (3 ** 2) = 512 (right-associative).
-static long long power(void) {
-    long long v = primary();
+static Value power(void) {
+    Value v = primary();
     if (err || tok.type != POW) return v;
+    size_t op_at = tok.start;
     next();
-    size_t exp_at = tok.start;  // a negative exponent is reported here
-    long long e = power();
-    if (err) return 0;
-    if (e < 0) { fail(exp_at); return 0; }
-    return ipow(v, e);
+    size_t rhs_at = tok.start;
+    Value e = power();
+    if (err) return v;
+    return apply(POW, v, e, op_at, rhs_at);
 }
 
 // Precedence comes from the call chain: expr() only sees results that term()
@@ -119,29 +178,31 @@ static long long power(void) {
 // 8 - 3 - 2 mean (8 - 3) - 2.
 
 // term := power { ('*' | '/') power }
-static long long term(void) {
-    long long v = power();
+static Value term(void) {
+    Value v = power();
     while (!err && (tok.type == STAR || tok.type == SLASH)) {
         int op = tok.type;
+        size_t op_at = tok.start;
         next();
-        size_t rhs = tok.start;     // division by zero is reported here
-        long long r = power();
+        size_t rhs_at = tok.start;
+        Value r = power();
         if (err) break;
-        if (op == STAR) v *= r;
-        else if (r == 0) fail(rhs);
-        else v /= r;    // C already truncates toward zero, as the task wants
+        v = apply(op, v, r, op_at, rhs_at);
     }
     return v;
 }
 
 // expr := term { ('+' | '-') term }
-static long long expr(void) {
-    long long v = term();
+static Value expr(void) {
+    Value v = term();
     while (!err && (tok.type == PLUS || tok.type == MINUS)) {
         int op = tok.type;
+        size_t op_at = tok.start;
         next();
-        long long r = term();
-        v = op == PLUS ? v + r : v - r;
+        size_t rhs_at = tok.start;
+        Value r = term();
+        if (err) break;
+        v = apply(op, v, r, op_at, rhs_at);
     }
     return v;
 }
@@ -160,17 +221,20 @@ static size_t eval_all(FILE *out) {
             while (pos < len && src[pos] != '\n') pos++;
             tok.start = pos;
         } else if (tok.type != END) {
-            long long v = expr();
+            Value v = expr();
             // A full expression must end the line; whatever is left is an error.
             if (!err && tok.type != END) fail(tok.start);
-            if (!err) fprintf(out, "%lld\n", v);
+            if (err) break;
+            if (v.is_float) fprintf(out, "%.15g\n", v.f);
+            else fprintf(out, "%lld\n", v.i);
         }
         pos = tok.start + 1;    // step over the '\n'
     }
     return err;
 }
 
-// Reads the whole file with one fread into one buffer of the exact size.
+// Reads the whole file with one fread into one buffer of the exact size,
+// plus one '\0' at the end so strtoll/strtod always stop inside the buffer.
 // The parser then walks over this buffer with an index, so even a file of
 // several megabytes is read once and never copied or reallocated again.
 static char *read_file(const char *path, size_t *size) {
@@ -179,8 +243,11 @@ static char *read_file(const char *path, size_t *size) {
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     rewind(f);
-    char *buf = n < 0 ? NULL : malloc(n > 0 ? n : 1);
-    if (buf) *size = fread(buf, 1, n, f);
+    char *buf = n < 0 ? NULL : malloc(n + 1);
+    if (buf) {
+        *size = fread(buf, 1, n, f);
+        buf[*size] = '\0';
+    }
     fclose(f);
     return buf;
 }
