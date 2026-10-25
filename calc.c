@@ -1,14 +1,14 @@
 // Serhii Voitov 251ADC006
 // https://github.com/Farckron/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: AI (Claude Code, Opus 5.5); course slides "Files, Arguments, Directories" (argv loop, opendir, mkdir)
+// Resources used: AI (Claude Code, Opus 5.5); course slides "Files, Arguments, Directories" (argv loop, opendir, mkdir) and "Advanced pointers, dynamic memory" (realloc)
 
 // AI (Claude Code): prompt "Implement the arithmetic parser lab in C from the
 //   task description. Keep the code clean, short, simple and easy to
 //   understand." It also got the task text and the sample tests. The whole
-//   file was written in that session, one grade level per commit (see the git
-//   history). The grammar is the one from the hint in the task. The comments
-//   explain why each part works the way it does.
+//   file was written in that session, mostly one grade level per commit (see
+//   the git history). The grammar is the one from the hint in the task, and
+//   the comments explain why each part works the way it does.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +64,7 @@ static void next(void) {
         // A number is digits, optionally followed by '.' and more digits.
         // If no digit follows the '.', the number stops before it and the
         // '.' becomes a BAD token, so "5." and ".5" fail at the '.', and
-        // "1.5e3" fails at the 'e', exactly where the task wants it.
+        // "1.5e3" fails at the 'e'. Those are the positions the task asks for.
         tok.type = NUM;
         while (pos < len && is_digit(src[pos])) pos++;
         int is_float = pos + 1 < len && src[pos] == '.' && is_digit(src[pos + 1]);
@@ -175,8 +175,9 @@ static size_t chain_len, chain_cap;
 
 // power := primary [ '**' power ]
 // ** is right-associative: 2 ** 3 ** 2 is 2 ** (3 ** 2) = 512. Calling
-// power() again for the exponent would give that grouping, but a line can
-// hold a chain of 100000 **, and one C call per ** overflows the call stack.
+// power() again for the exponent would give that grouping too, but lines can
+// be megabytes long, and a chain of 100000 ** would mean 100000 nested calls,
+// which overflows the call stack.
 // So the operands are first collected in the chain array and then combined
 // starting from the right end, which gives the same grouping with a loop.
 // A primary can contain parentheses with their own chain. That chain is
@@ -208,8 +209,8 @@ static Value power(void) {
     return r;
 }
 
-// Precedence comes from the call chain: expr() only sees results that term()
-// has already finished, and term() only sees finished power() results, so
+// Precedence comes from which function calls which: expr() only sees results
+// that term() has already finished, and term() only sees finished power() results, so
 // ** binds tighter than * and /, which bind tighter than + and -. The while
 // loops apply operators of the same level from left to right, which makes
 // 8 - 3 - 2 mean (8 - 3) - 2.
@@ -259,7 +260,8 @@ static size_t eval_all(FILE *out) {
             tok.start = pos;
         } else if (tok.type != END) {
             Value v = expr();
-            // A full expression must end the line; whatever is left is an error.
+            // A full expression must end the line, so anything left over (an
+            // extra ')', a second number, a '#') is an error at that token.
             if (!err && tok.type != END) fail(tok.start);
             if (err) break;
             if (v.is_float) fprintf(out, "%.15g\n", v.f);
