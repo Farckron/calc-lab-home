@@ -8,8 +8,10 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
-#define STUDENT "serhii_voitov_251ADC006"
+#define FULL_ID "serhii_voitov_251ADC006"   // used in output file names
+#define SHORT_ID "serhii_251ADC006"         // used in the default output folder name
 
 enum { NUM, PLUS, MINUS, STAR, SLASH, POW, LPAREN, RPAREN, END, BAD };
 
@@ -168,46 +170,46 @@ static size_t eval_all(FILE *out) {
     return err;
 }
 
-// Reads the whole file with one fread, so every token and position refers to
-// the same buffer and nothing is copied again while parsing.
+// Reads the whole file with one fread into one buffer of the exact size.
+// The parser then walks over this buffer with an index, so even a file of
+// several megabytes is read once and never copied or reallocated again.
 static char *read_file(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     rewind(f);
-    char *buf = malloc(n > 0 ? n : 1);
+    char *buf = n < 0 ? NULL : malloc(n > 0 ? n : 1);
     if (buf) *size = fread(buf, 1, n, f);
     fclose(f);
     return buf;
 }
 
-int main(int argc, char *argv[]) {
-    const char *outdir = NULL, *input = NULL;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) outdir = argv[++i];
-        else input = argv[i];
-    }
-    if (!input || !outdir) {
-        fprintf(stderr, "usage: calc -o OUTDIR input.txt\n");
-        return 1;
-    }
+// Writes the last part of path into name: "labs/task1.txt" gives "task1"
+// (with strip_txt) and "../labs/" gives "labs".
+static void base_name(const char *path, int strip_txt, char *name, size_t size) {
+    size_t end = strlen(path);
+    while (end > 1 && path[end - 1] == '/') end--;
+    size_t start = end;
+    while (start > 0 && path[start - 1] != '/') start--;
+    size_t n = end - start;
+    if (strip_txt && n > 4 && strncmp(path + end - 4, ".txt", 4) == 0) n -= 4;
+    snprintf(name, size, "%.*s", (int)n, path + start);
+}
 
+// Evaluates one input file into <outdir>/<base>_<name>_<lastname>_<id>.txt.
+// Returns 0 on success and 1 if the input or the output file fails.
+static int run_file(const char *input, const char *outdir) {
     char *buf = read_file(input, &len);
     if (!buf) { perror(input); return 1; }
     src = buf;
 
-    // Output name: <OUTDIR>/<input name without .txt>_<name>_<lastname>_<id>.txt
-    const char *base = strrchr(input, '/') ? strrchr(input, '/') + 1 : input;
-    size_t blen = strlen(base);
-    if (blen > 4 && strcmp(base + blen - 4, ".txt") == 0) blen -= 4;
-    char path[4096];
-    snprintf(path, sizeof path, "%s/%.*s_%s.txt", outdir, (int)blen, base, STUDENT);
-
-    // The output folder may already exist, which is fine.
-    if (mkdir(outdir, 0755) != 0 && errno != EEXIST) { perror(outdir); free(buf); return 1; }
+    char name[1024], path[4096];
+    base_name(input, 1, name, sizeof name);
+    snprintf(path, sizeof path, "%s/%s_%s.txt", outdir, name, FULL_ID);
     FILE *out = fopen(path, "w");
     if (!out) { perror(path); free(buf); return 1; }
+
     size_t e = eval_all(out);
     // Only the first error may be in the file, so throw away the results
     // written so far by opening the file again for writing (this empties it).
@@ -215,7 +217,70 @@ int main(int argc, char *argv[]) {
         out = freopen(path, "w", out);
         if (out) fprintf(out, "ERROR:%zu\n", e);
     }
-    if (out) fclose(out);
+    // fclose() flushes the last buffered results, so a full disk shows up here.
+    int failed = !out || fclose(out) != 0;
+    if (failed) fprintf(stderr, "calc: could not write %s\n", path);
     free(buf);
-    return 0;
+    return failed;
+}
+
+static void usage(void) {
+    fprintf(stderr, "usage: calc [-d DIR | --dir DIR] [-o OUTDIR | --output-dir OUTDIR] [input.txt]\n");
+}
+
+int main(int argc, char *argv[]) {
+    const char *dir = NULL, *outdir = NULL, *input = NULL;
+    // Same strcmp() loop as in the lecture on command-line arguments.
+    // An option without its value falls through to the "-" check below.
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if ((!strcmp(a, "-d") || !strcmp(a, "--dir")) && i + 1 < argc) dir = argv[++i];
+        else if ((!strcmp(a, "-o") || !strcmp(a, "--output-dir")) && i + 1 < argc) outdir = argv[++i];
+        else if (a[0] == '-' || input) {
+            fprintf(stderr, "calc: unexpected argument '%s'\n", a);
+            usage();
+            return 1;
+        } else input = a;
+    }
+    // Exactly one of -d DIR or input.txt must be given.
+    if (!dir == !input) { usage(); return 1; }
+
+    // Check the input before creating anything, so a typo in the path does
+    // not leave an empty output folder behind.
+    const char *target = dir ? dir : input;
+    struct stat st;
+    if (stat(target, &st) != 0) { perror(target); return 1; }
+    if (dir ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "calc: %s is not a %s\n", target, dir ? "folder" : "file");
+        return 1;
+    }
+
+    // Default output folder: <input_base>_<name>_<id> in the current folder.
+    char default_out[1100];
+    if (!outdir) {
+        char name[1024];
+        base_name(target, !dir, name, sizeof name);
+        snprintf(default_out, sizeof default_out, "%s_%s", name, SHORT_ID);
+        outdir = default_out;
+    }
+    // The output folder may already exist, which is fine.
+    if (mkdir(outdir, 0755) != 0 && errno != EEXIST) { perror(outdir); return 1; }
+
+    if (!dir) return run_file(input, outdir);
+
+    // -d: every *.txt directly inside DIR. readdir() does not go into
+    // subfolders, and stat() skips a folder that happens to be named x.txt.
+    DIR *d = opendir(dir);
+    if (!d) { perror(dir); return 1; }
+    int failed = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        size_t n = strlen(ent->d_name);
+        if (n <= 4 || strcmp(ent->d_name + n - 4, ".txt") != 0) continue;
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s", dir, ent->d_name);
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) failed |= run_file(path, outdir);
+    }
+    closedir(d);
+    return failed;
 }
