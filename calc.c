@@ -163,19 +163,49 @@ static Value primary(void) {
     return v;
 }
 
+// One operand of a ** chain, with the positions its errors are reported at.
+typedef struct {
+    Value v;
+    size_t op_at;   // the ** in front of this operand
+    size_t rhs_at;  // where this operand starts
+} PowItem;
+
+static PowItem *chain;  // operands of the ** chains being parsed right now
+static size_t chain_len, chain_cap;
+
 // power := primary [ '**' power ]
-// The exponent is parsed by calling power() again, not with a loop like the
-// other levels. That recursion finishes the right side first, so
-// 2 ** 3 ** 2 groups as 2 ** (3 ** 2) = 512 (right-associative).
+// ** is right-associative: 2 ** 3 ** 2 is 2 ** (3 ** 2) = 512. Calling
+// power() again for the exponent would give that grouping, but a line can
+// hold a chain of 100000 **, and one C call per ** overflows the call stack.
+// So the operands are first collected in the chain array and then combined
+// starting from the right end, which gives the same grouping with a loop.
+// A primary can contain parentheses with their own chain. That chain is
+// added above ours and removed again before we continue, so remembering
+// where ours starts (first) is enough.
 static Value power(void) {
-    Value v = primary();
-    if (err || tok.type != POW) return v;
-    size_t op_at = tok.start;
-    next();
-    size_t rhs_at = tok.start;
-    Value e = power();
-    if (err) return v;
-    return apply(POW, v, e, op_at, rhs_at);
+    size_t first = chain_len;
+    size_t op_at = 0, rhs_at = tok.start;
+    for (;;) {
+        Value v = primary();
+        if (err) { chain_len = first; return v; }
+        if (chain_len == chain_cap) {
+            chain_cap = chain_cap ? chain_cap * 2 : 64;
+            chain = realloc(chain, chain_cap * sizeof *chain);
+            if (!chain) { fprintf(stderr, "calc: out of memory\n"); exit(1); }
+        }
+        chain[chain_len++] = (PowItem){v, op_at, rhs_at};
+        if (tok.type != POW) break;
+        op_at = tok.start;
+        next();
+        rhs_at = tok.start;
+    }
+    // r is everything to the right of chain[i - 1], so it is the exponent
+    // of the ** in front of chain[i].
+    Value r = chain[chain_len - 1].v;
+    for (size_t i = chain_len - 1; i > first && !err; i--)
+        r = apply(POW, chain[i - 1].v, r, chain[i].op_at, chain[i].rhs_at);
+    chain_len = first;
+    return r;
 }
 
 // Precedence comes from the call chain: expr() only sees results that term()
@@ -285,6 +315,9 @@ static int run_file(const char *input, const char *outdir) {
     if (!out) { perror(path); free(buf); return 1; }
 
     size_t e = eval_all(out);
+    free(chain);
+    chain = NULL;
+    chain_cap = 0;
     // Only the first error may be in the file, so throw away the results
     // written so far by opening the file again for writing (this empties it).
     if (e) {
