@@ -11,7 +11,7 @@
 
 #define STUDENT "serhii_voitov_251ADC006"
 
-enum { NUM, PLUS, MINUS, STAR, SLASH, LPAREN, RPAREN, END, BAD };
+enum { NUM, PLUS, MINUS, STAR, SLASH, POW, LPAREN, RPAREN, END, BAD };
 
 typedef struct {
     int type;
@@ -49,6 +49,9 @@ static void next(void) {
     pos++;
     if (c == '+') tok.type = PLUS;
     else if (c == '-') tok.type = MINUS;
+    // "**" is one token only when the two stars touch, so "2 * * 3" is two
+    // operators in a row and fails at the second '*'.
+    else if (c == '*' && pos < len && src[pos] == '*') { tok.type = POW; pos++; }
     else if (c == '*') tok.type = STAR;
     else if (c == '/') tok.type = SLASH;
     else if (c == '(') tok.type = LPAREN;
@@ -79,19 +82,48 @@ static long long primary(void) {
     return v;
 }
 
+// Integer power by repeated squaring, so even 1 ** 1000000000 takes about
+// 30 steps. b is squared only while bits of e are left, so it never grows
+// past the final result (the tests promise that result fits).
+static long long ipow(long long b, long long e) {
+    long long r = 1;    // also makes x ** 0 == 1, including 0 ** 0
+    while (e > 0) {
+        if (e & 1) r *= b;
+        e >>= 1;
+        if (e > 0) b *= b;
+    }
+    return r;
+}
+
+// power := primary [ '**' power ]
+// The exponent is parsed by calling power() again, not with a loop like the
+// other levels. That recursion finishes the right side first, so
+// 2 ** 3 ** 2 groups as 2 ** (3 ** 2) = 512 (right-associative).
+static long long power(void) {
+    long long v = primary();
+    if (err || tok.type != POW) return v;
+    next();
+    size_t exp_at = tok.start;  // a negative exponent is reported here
+    long long e = power();
+    if (err) return 0;
+    if (e < 0) { fail(exp_at); return 0; }
+    return ipow(v, e);
+}
+
 // Precedence comes from the call chain: expr() only sees results that term()
-// has already finished, so * and / are applied before + and -. The while
+// has already finished, and term() only sees finished power() results, so
+// ** binds tighter than * and /, which bind tighter than + and -. The while
 // loops apply operators of the same level from left to right, which makes
 // 8 - 3 - 2 mean (8 - 3) - 2.
 
-// term := primary { ('*' | '/') primary }
+// term := power { ('*' | '/') power }
 static long long term(void) {
-    long long v = primary();
+    long long v = power();
     while (!err && (tok.type == STAR || tok.type == SLASH)) {
         int op = tok.type;
         next();
         size_t rhs = tok.start;     // division by zero is reported here
-        long long r = primary();
+        long long r = power();
         if (err) break;
         if (op == STAR) v *= r;
         else if (r == 0) fail(rhs);
@@ -119,7 +151,13 @@ static size_t eval_all(FILE *out) {
     err = 0;
     while (pos < len && !err) {
         next();
-        if (tok.type != END) {
+        if (tok.type == BAD && src[tok.start] == '#') {
+            // '#' as the first thing on a line makes it a comment. Skipping
+            // still moves pos through the comment, so later positions keep
+            // counting its characters. A '#' anywhere else stays BAD.
+            while (pos < len && src[pos] != '\n') pos++;
+            tok.start = pos;
+        } else if (tok.type != END) {
             long long v = expr();
             // A full expression must end the line; whatever is left is an error.
             if (!err && tok.type != END) fail(tok.start);
