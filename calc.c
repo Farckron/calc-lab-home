@@ -1,7 +1,14 @@
 // Serhii Voitov 251ADC006
 // https://github.com/Farckron/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources used: course slides "Files, Arguments, Directories" and "Advanced pointers, dynamic memory"; cppreference.com; AI (Claude Code, Opus 5.5), see the AI notes below
+// Resources used: AI (Claude Code, Opus 5.5); course slides "Files, Arguments, Directories" (argv loop, opendir, mkdir)
+
+// AI (Claude Code): prompt "Implement the arithmetic parser lab in C from the
+//   task description. Keep the code clean, short, simple and easy to
+//   understand." It also got the task text and the sample tests. The whole
+//   file was written in that session, one grade level per commit (see the git
+//   history). The grammar is the one from the hint in the task. The comments
+//   explain why each part works the way it does.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,8 +52,8 @@ static void fail(size_t index) {
 static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
 // Reads the next token into tok. A line ends at '\n' or at the end of the
-// file, and both become END, so "missing operand at end of line" naturally
-// points at the '\n' (or at file length + 1 when there is no final '\n').
+// file, and both become END, so "missing operand at end of line" points
+// at the '\n' (or at file length + 1 when there is no final '\n').
 static void next(void) {
     while (pos < len && (src[pos] == ' ' || src[pos] == '\t')) pos++;
     tok.start = pos;
