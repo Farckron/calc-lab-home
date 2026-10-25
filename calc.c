@@ -11,7 +11,7 @@
 
 #define STUDENT "serhii_voitov_251ADC006"
 
-enum { NUM, PLUS, MINUS, END, BAD };
+enum { NUM, PLUS, MINUS, STAR, SLASH, END, BAD };
 
 typedef struct {
     int type;
@@ -49,6 +49,8 @@ static void next(void) {
     pos++;
     if (c == '+') tok.type = PLUS;
     else if (c == '-') tok.type = MINUS;
+    else if (c == '*') tok.type = STAR;
+    else if (c == '/') tok.type = SLASH;
     else tok.type = BAD;
 }
 
@@ -62,13 +64,34 @@ static long long primary(void) {
     return v;
 }
 
-// expr := primary { ('+' | '-') primary }
-static long long expr(void) {
+// Precedence comes from the call chain: expr() only sees results that term()
+// has already finished, so * and / are applied before + and -. The while
+// loops apply operators of the same level from left to right, which makes
+// 8 - 3 - 2 mean (8 - 3) - 2.
+
+// term := primary { ('*' | '/') primary }
+static long long term(void) {
     long long v = primary();
+    while (!err && (tok.type == STAR || tok.type == SLASH)) {
+        int op = tok.type;
+        next();
+        size_t rhs = tok.start;     // division by zero is reported here
+        long long r = primary();
+        if (err) break;
+        if (op == STAR) v *= r;
+        else if (r == 0) fail(rhs);
+        else v /= r;    // C already truncates toward zero, as the task wants
+    }
+    return v;
+}
+
+// expr := term { ('+' | '-') term }
+static long long expr(void) {
+    long long v = term();
     while (!err && (tok.type == PLUS || tok.type == MINUS)) {
         int op = tok.type;
         next();
-        long long r = primary();
+        long long r = term();
         v = op == PLUS ? v + r : v - r;
     }
     return v;
