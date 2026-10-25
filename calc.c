@@ -11,7 +11,7 @@
 
 #define STUDENT "serhii_voitov_251ADC006"
 
-enum { NUM, PLUS, MINUS, STAR, SLASH, END, BAD };
+enum { NUM, PLUS, MINUS, STAR, SLASH, LPAREN, RPAREN, END, BAD };
 
 typedef struct {
     int type;
@@ -51,15 +51,30 @@ static void next(void) {
     else if (c == '-') tok.type = MINUS;
     else if (c == '*') tok.type = STAR;
     else if (c == '/') tok.type = SLASH;
+    else if (c == '(') tok.type = LPAREN;
+    else if (c == ')') tok.type = RPAREN;
     else tok.type = BAD;
 }
 
-// There are no unary operators, so a number must come here. Anything else
-// (an operator, a bad character, the end of the line) is reported at the
-// start of that token, because that is where the parser got stuck.
+static long long expr(void);
+
+// primary := NUMBER | '(' expr ')'
+// There are no unary operators, so a number or '(' must come here. Anything
+// else (an operator, ')', a bad character, the end of the line) is reported
+// at the start of that token, because that is where the parser got stuck.
+// A missing ')' is found the same way: after the inner expr the parser
+// expects ')', sees END instead, and reports the '\n' position.
 static long long primary(void) {
-    if (tok.type != NUM) { fail(tok.start); return 0; }
-    long long v = tok.val;
+    if (tok.type == NUM) {
+        long long v = tok.val;
+        next();
+        return v;
+    }
+    if (tok.type != LPAREN) { fail(tok.start); return 0; }
+    next();
+    long long v = expr();
+    if (err) return 0;
+    if (tok.type != RPAREN) { fail(tok.start); return 0; }
     next();
     return v;
 }
